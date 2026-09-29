@@ -1,5 +1,5 @@
 # =====================================================================
-#  bistro-topic.tcl  v1.0
+#  bistro-topic.tcl  v1.1
 #  Geburtstage & Todestage im Topic von #irc-bistro
 #  fuer Eggdrop 1.8.x (Tcl 8.5 / 8.6)
 #  Lizenz: MIT - siehe LICENSE
@@ -117,12 +117,12 @@ proc ::bistro::load {} {
         set line [string trim $line]
         if {$line eq "" || [string index $line 0] eq "#"} { continue }
         # erstes Datum suchen -> alles davor ist der Name
-        if {![regexp -indices {\s\d{1,2}\.\d{1,2}\.} $line pos]} { continue }
+        if {![regexp -indices {\s\d{1,2}\.\d{1,2}(?:\.|\s|$)} $line pos]} { continue }
         set p    [lindex $pos 0]
         set name [string trim [string range $line 0 $p]]
         set rest [string trim [string range $line $p end]]
         if {$name eq ""} { continue }
-        if {![regexp {^(\d{1,2})\.(\d{1,2})\.(\d{4})?\s*(?:\+\s*(\d{1,2})\.(\d{1,2})\.(\d{4}))?$} \
+        if {![regexp {^(\d{1,2})\.(\d{1,2})\.?(\d{4})?\s*(?:\+\s*(\d{1,2})\.(\d{1,2})\.(\d{4}))?$} \
                   $rest -> bd bm by dd dm dy]} {
             putlog "bistro: Zeile $lineno nicht verstanden: $line"
             continue
@@ -276,7 +276,7 @@ proc ::bistro::savestate {} {
 proc ::bistro::loadstate {} {
     variable statefile
     variable state
-    array set state {date "" saved "" set "" suffix "" done ""}
+    array set state {date "" saved "" set "" suffix ""}
     if {![file readable $statefile]} { return }
     if {[catch {
         set fd [open $statefile r]
@@ -309,63 +309,57 @@ proc ::bistro::check {} {
     load
     set now   [clock seconds]
     set today [clock format $now -format %Y-%m-%d]
-    set cur   [topic $chan]
-    set base  $cur
-    set restored 0
-    set changed  0
+    scan [clock format $now -format "%d %m %Y"] "%d %d %d" d m y
 
-    # 1) Zusatz vom Vortag entfernen
-    if {$state(date) ne "" && $state(date) ne $today} {
-        if {![cantopic $chan]} {
-            if {$warned ne $today} {
-                putlog "bistro: kann Topic in $chan nicht zuruecksetzen (kein Op?) - versuche es weiter."
-                set warned $today
-            }
-            return
+    # Soll-Zustand fuer heute (wird jedes Mal neu berechnet, damit
+    # Aenderungen an der .txt sofort wirken)
+    set msg    [buildmsg $d $m $y]
+    set suffix [expr {$msg eq "" ? "" : [out $msg]}]
+
+    # Ist-Zustand
+    set active ""
+    if {$state(date) eq $today} { set active $state(suffix) }
+    set stale [expr {$state(date) ne "" && $state(date) ne $today}]
+
+    # nichts zu tun
+    if {!$stale && $active eq $suffix} { return }
+
+    if {![cantopic $chan]} {
+        if {$warned ne $today} {
+            putlog "bistro: kann Topic in $chan nicht aendern (kein Op?) - versuche es jede Minute weiter."
+            set warned $today
         }
-        set base [restorebase $cur]
-        array set state {date "" saved "" set "" suffix ""}
-        set restored 1
-        set changed 1
+        return
     }
 
-    # 2) heutige Geburtstage/Todestage
-    set msg ""
+    set cur  [topic $chan]
+    set base $cur
+    set hadold [expr {$state(date) ne ""}]
+
+    # 1) alten Zusatz entfernen (Vortag oder geaenderte Liste)
+    if {$hadold} { set base [restorebase $cur] }
+    array set state {date "" saved "" set "" suffix ""}
+
+    # 2) neuen Zusatz anhaengen
     set target $base
-    if {$state(done) ne $today} {
-        scan [clock format $now -format "%d %m %Y"] "%d %d %d" d m y
-        set msg [buildmsg $d $m $y]
-        if {$msg ne ""} {
-            if {![cantopic $chan]} {
-                if {$warned ne $today} {
-                    putlog "bistro: kann Topic in $chan nicht setzen (kein Op?) - versuche es weiter."
-                    set warned $today
-                }
-                return
-            }
-            set suffix [out $msg]
-            # Zusatz evtl. schon vorhanden (z.B. Zustand verloren) -> nicht doppelt
-            set i [string first "$sep$suffix" $base]
-            if {$i >= 0} {
-                set base [string replace $base $i [expr {$i + [string length "$sep$suffix"] - 1}]]
-            } elseif {$base eq $suffix} {
-                set base ""
-            }
-            set target [compose $base $suffix]
-            array set state [list date $today saved $base set $target suffix $suffix]
+    if {$suffix ne ""} {
+        # Zusatz evtl. schon vorhanden (z.B. Zustand verloren) -> nicht doppelt
+        set i [string first "$sep$suffix" $base]
+        if {$i >= 0} {
+            set base [string replace $base $i [expr {$i + [string length "$sep$suffix"] - 1}]]
+        } elseif {$base eq $suffix} {
+            set base ""
         }
-        set state(done) $today
-        set changed 1
+        set target [compose $base $suffix]
+        array set state [list date $today saved $base set $target suffix $suffix]
     }
-
-    if {!$changed} { return }
 
     if {$target ne $cur} {
         putserv "TOPIC $chan :$target"
-        if {$msg ne ""} {
+        if {$suffix ne ""} {
             putlog "bistro: Topic gesetzt: $msg"
             talk [string map [list %chan% $chan %msg% $msg] $txt_talk]
-        } elseif {$restored} {
+        } else {
             putlog "bistro: vorherige Topic in $chan wiederhergestellt"
             if {$txt_restore ne ""} {
                 talk [string map [list %chan% $chan] $txt_restore]
@@ -417,7 +411,6 @@ proc ::bistro::dcc {hand idx text} {
             } else {
                 putdcc $idx "Kein aktiver Topic-Zusatz."
             }
-            putdcc $idx "Zuletzt geprueft fuer: [expr {$state(done) eq "" ? "-" : $state(done)}]"
         }
         test {
             if {![regexp {^(\d{1,2})\.(\d{1,2})\.?(\d{4})?$} $arg -> d m y]} {
@@ -452,7 +445,7 @@ proc ::bistro::dcc {hand idx text} {
             putdcc $idx "bistro: [llength $entries] Eintraege geladen."
         }
         reset {
-            array set state {date "" saved "" set "" suffix "" done ""}
+            array set state {date "" saved "" set "" suffix ""}
             savestate
             putdcc $idx "bistro: Zustand zurueckgesetzt (Topic wurde nicht veraendert)."
         }
@@ -466,7 +459,7 @@ proc ::bistro::dcc {hand idx text} {
 # ---------------------------------------------------------------------
 #  Start
 # ---------------------------------------------------------------------
-if {![info exists ::bistro::state(done)]} { ::bistro::loadstate }
+if {![info exists ::bistro::state(date)]} { ::bistro::loadstate }
 if {![array exists ::bistro::joined]} { array set ::bistro::joined {} }
 
 bind time - "* * * * *"           ::bistro::tick
@@ -474,4 +467,4 @@ bind join - "$::bistro::chan *"   ::bistro::onjoin
 bind dcc  m bistro                ::bistro::dcc
 
 ::bistro::load
-putlog "bistro-topic.tcl v1.0 geladen ([llength $::bistro::entries] Eintraege)"
+putlog "bistro-topic.tcl v1.1 geladen ([llength $::bistro::entries] Eintraege)"
