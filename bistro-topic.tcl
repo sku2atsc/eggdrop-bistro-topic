@@ -1,5 +1,5 @@
 # =====================================================================
-#  bistro-topic.tcl  v1.2
+#  bistro-topic.tcl  v1.3
 #  Geburtstage & Todestage im Topic von #irc-bistro
 #  fuer Eggdrop 1.8.x (Tcl 8.5 / 8.6)
 #  Lizenz: MIT - siehe LICENSE
@@ -25,6 +25,12 @@
 #     .bistro check         Pruefung sofort ausfuehren
 #     .bistro reload        Datei neu einlesen
 #     .bistro reset         gespeicherten Zustand verwerfen
+#     .bistro add <Name> TT.MM.[JJJJ] [+ TT.MM.JJJJ]
+#                           Eintrag hinzufuegen (sortiert nach Datum)
+#     .bistro del <Name>    Eintrag entfernen
+#     .bistro rip <Name> TT.MM.JJJJ
+#                           Todesdatum setzen/aendern ("-" entfernt es)
+#  Vor jeder Aenderung wird eine Sicherung *.bak angelegt.
 #
 #  Installation: Datei nach scripts/ kopieren und in eggdrop.conf
 #     source scripts/bistro-topic.tcl
@@ -75,12 +81,53 @@ namespace eval ::bistro {
     variable state
 }
 
+# Zeile auswerten:
+#   ""    = keine Datenzeile (Kommentar, Ueberschrift, leer)
+#   "ERR" = Datenzeile mit ungueltigem Datum
+#   sonst = {name bd bm dd dm dy by}
+proc ::bistro::parseline {line} {
+    set line [string trim $line]
+    if {$line eq "" || [string index $line 0] eq "#"} { return "" }
+    # erstes Datum suchen -> alles davor ist der Name
+    if {![regexp -indices {\s\d{1,2}\.\d{1,2}(?:\.|\s|$)} $line pos]} { return "" }
+    set p    [lindex $pos 0]
+    set name [string trim [string range $line 0 $p]]
+    set rest [string trim [string range $line $p end]]
+    if {$name eq ""} { return "" }
+    if {![regexp {^(\d{1,2})\.(\d{1,2})\.?(\d{4})?\s*(?:\+\s*(\d{1,2})\.(\d{1,2})\.(\d{4}))?$} \
+              $rest -> bd bm by dd dm dy]} {
+        return "ERR"
+    }
+    # scan statt expr -> "08"/"09" werden nicht als Oktalzahl gelesen
+    scan $bd %d bd
+    scan $bm %d bm
+    if {$bd < 1 || $bd > 31 || $bm < 1 || $bm > 12} { return "ERR" }
+    if {$by ne ""} { scan $by %d by }
+    if {$dd ne ""} {
+        scan $dd %d dd
+        scan $dm %d dm
+        scan $dy %d dy
+        if {$dd < 1 || $dd > 31 || $dm < 1 || $dm > 12} { return "ERR" }
+    }
+    return [list $name $bd $bm $dd $dm $dy $by]
+}
+
+# Zeichensatz der Datei bestimmen
+proc ::bistro::detectenc {raw} {
+    variable fileenc
+    if {$fileenc ne "auto"} { return $fileenc }
+    # gueltiges UTF-8? sonst Latin-1 annehmen
+    if {[encoding convertto utf-8 [encoding convertfrom utf-8 $raw]] eq $raw} {
+        return utf-8
+    }
+    return iso8859-1
+}
+
 # ---------------------------------------------------------------------
 #  Datei einlesen (nur wenn sie sich geaendert hat)
 # ---------------------------------------------------------------------
 proc ::bistro::load {} {
     variable datafile
-    variable fileenc
     variable entries
     variable mtime
 
@@ -100,56 +147,102 @@ proc ::bistro::load {} {
     set raw [read $fd]
     close $fd
 
-    set enc $fileenc
-    if {$enc eq "auto"} {
-        # gueltiges UTF-8? sonst Latin-1 annehmen
-        if {[encoding convertto utf-8 [encoding convertfrom utf-8 $raw]] eq $raw} {
-            set enc utf-8
-        } else {
-            set enc iso8859-1
-        }
-    }
+    set enc  [detectenc $raw]
     set data [encoding convertfrom $enc $raw]
 
     set new {}
     set lineno 0
     foreach line [split $data "\n"] {
         incr lineno
-        set line [string trim $line]
-        if {$line eq "" || [string index $line 0] eq "#"} { continue }
-        # erstes Datum suchen -> alles davor ist der Name
-        if {![regexp -indices {\s\d{1,2}\.\d{1,2}(?:\.|\s|$)} $line pos]} { continue }
-        set p    [lindex $pos 0]
-        set name [string trim [string range $line 0 $p]]
-        set rest [string trim [string range $line $p end]]
-        if {$name eq ""} { continue }
-        if {![regexp {^(\d{1,2})\.(\d{1,2})\.?(\d{4})?\s*(?:\+\s*(\d{1,2})\.(\d{1,2})\.(\d{4}))?$} \
-                  $rest -> bd bm by dd dm dy]} {
-            putlog "bistro: Zeile $lineno nicht verstanden: $line"
+        set r [parseline $line]
+        if {$r eq ""} { continue }
+        if {$r eq "ERR"} {
+            putlog "bistro: Zeile $lineno nicht verstanden: [string trim $line]"
             continue
         }
-        # scan statt expr -> "08"/"09" werden nicht als Oktalzahl gelesen
-        scan $bd %d bd
-        scan $bm %d bm
-        if {$bd < 1 || $bd > 31 || $bm < 1 || $bm > 12} {
-            putlog "bistro: Zeile $lineno ungueltiges Datum: $line"
-            continue
-        }
-        if {$dd ne ""} {
-            scan $dd %d dd
-            scan $dm %d dm
-            scan $dy %d dy
-            if {$dd < 1 || $dd > 31 || $dm < 1 || $dm > 12} {
-                putlog "bistro: Zeile $lineno ungueltiges Todesdatum: $line"
-                set dd ""; set dm ""; set dy ""
-            }
-        }
-        lappend new [list $name $bd $bm $dd $dm $dy]
+        lappend new $r
     }
     set entries $new
     set mtime $mt
     putlog "bistro: [llength $entries] Eintraege aus $datafile geladen ($enc)"
     return 1
+}
+
+# ---------------------------------------------------------------------
+#  Datei bearbeiten (fuer .bistro add/del/rip)
+# ---------------------------------------------------------------------
+# liefert {encoding zeilenende zeilen}
+proc ::bistro::readfile {} {
+    variable datafile
+    if {![file exists $datafile]} { return [list utf-8 "\n" {}] }
+    set fd [open $datafile r]
+    fconfigure $fd -translation binary
+    set raw [read $fd]
+    close $fd
+    set enc  [detectenc $raw]
+    set eol  [expr {[string first "\r\n" $raw] >= 0 ? "\r\n" : "\n"}]
+    set data [encoding convertfrom $enc $raw]
+    set lines {}
+    foreach l [split $data "\n"] { lappend lines [string trimright $l "\r"] }
+    # letzte Leerzeile durch abschliessenden Umbruch entfernen
+    if {[llength $lines] && [lindex $lines end] eq ""} {
+        set lines [lrange $lines 0 end-1]
+    }
+    return [list $enc $eol $lines]
+}
+
+proc ::bistro::writefile {enc eol lines} {
+    variable datafile
+    variable mtime
+    set data "[join $lines $eol]$eol"
+    # passt ein neuer Name nicht in Latin-1 -> Datei als UTF-8 speichern
+    if {$enc ne "utf-8" &&
+        [encoding convertfrom $enc [encoding convertto $enc $data]] ne $data} {
+        putlog "bistro: Sonderzeichen passen nicht in $enc - speichere als utf-8"
+        set enc utf-8
+    }
+    if {[file exists $datafile]} {
+        catch {file copy -force $datafile "$datafile.bak"}
+    }
+    set fd [open $datafile w]
+    fconfigure $fd -translation binary
+    puts -nonewline $fd [encoding convertto $enc $data]
+    close $fd
+    set mtime -1
+    load
+}
+
+# Zeile im Stil der Liste formatieren (Tabs bis Spalte 24)
+proc ::bistro::formatline {name bd bm dd dm dy by} {
+    set tabs [expr {(24 - [string length $name] + 7) / 8}]
+    if {$tabs < 1} { set tabs 1 }
+    set l "$name[string repeat "\t" $tabs][format %02d.%02d. $bd $bm]"
+    if {$by ne ""} { append l $by }
+    if {$dd ne ""} { append l "\t\t+ [format %02d.%02d.%04d $dd $dm $dy]" }
+    return $l
+}
+
+# Zeilennummern passender Eintraege: exakter Name hat Vorrang,
+# sonst reicht das erste Wort ("sacon" findet "sacon (Juergen)")
+proc ::bistro::findlines {lines who} {
+    set who [string tolower [string trim $who]]
+    set exact {}
+    set loose {}
+    set i 0
+    foreach l $lines {
+        set r [parseline $l]
+        if {[llength $r] == 7} {
+            set n [string tolower [lindex $r 0]]
+            if {$n eq $who} {
+                lappend exact $i
+            } elseif {[lindex [split $n] 0] eq $who} {
+                lappend loose $i
+            }
+        }
+        incr i
+    }
+    if {[llength $exact]} { return $exact }
+    return $loose
 }
 
 # ---------------------------------------------------------------------
@@ -438,6 +531,114 @@ proc ::bistro::dcc {hand idx text} {
             }
             putdcc $idx "[llength $entries] Eintraege."
         }
+        add {
+            # .bistro add <Name> TT.MM.[JJJJ] [+ TT.MM.JJJJ]
+            set toks [regexp -all -inline {\S+} $text]
+            set line [join [lrange $toks 1 end] " "]
+            set r [parseline $line]
+            if {[llength $r] != 7} {
+                putdcc $idx "Benutzung: .bistro add <Name> TT.MM.\[JJJJ\] \[+ TT.MM.JJJJ\]"
+                putdcc $idx "Beispiel:  .bistro add Hamster 29.09."
+                return 0
+            }
+            foreach {name bd bm dd dm dy by} $r break
+            foreach {enc eol lines} [readfile] break
+            foreach i [findlines $lines $name] {
+                if {[string tolower [lindex [parseline [lindex $lines $i]] 0]] eq [string tolower $name]} {
+                    putdcc $idx "bistro: \"$name\" steht schon in der Liste: [string trim [lindex $lines $i]]"
+                    return 0
+                }
+            }
+            # nach Datum sortiert einfuegen
+            set pos -1
+            set last -1
+            set i 0
+            foreach l $lines {
+                set e [parseline $l]
+                if {[llength $e] == 7} {
+                    set last $i
+                    if {$pos < 0 && [lindex $e 2] * 100 + [lindex $e 1] > $bm * 100 + $bd} {
+                        set pos $i
+                    }
+                }
+                incr i
+            }
+            if {$pos < 0} {
+                set pos [expr {$last < 0 ? [llength $lines] : $last + 1}]
+            }
+            set new [formatline $name $bd $bm $dd $dm $dy $by]
+            set lines [linsert $lines $pos $new]
+            writefile $enc $eol $lines
+            putdcc $idx "bistro: hinzugefuegt: $new"
+            putlog "bistro: $hand hat \"$name\" hinzugefuegt"
+            safecheck
+        }
+        del {
+            # .bistro del <Name>
+            set toks [regexp -all -inline {\S+} $text]
+            set who [join [lrange $toks 1 end] " "]
+            if {$who eq ""} {
+                putdcc $idx "Benutzung: .bistro del <Name>"
+                return 0
+            }
+            foreach {enc eol lines} [readfile] break
+            set hits [findlines $lines $who]
+            if {[llength $hits] == 0} {
+                putdcc $idx "bistro: \"$who\" nicht gefunden."
+                return 0
+            }
+            if {[llength $hits] > 1} {
+                putdcc $idx "bistro: \"$who\" ist nicht eindeutig, bitte vollen Namen angeben:"
+                foreach i $hits { putdcc $idx "   [string trim [lindex $lines $i]]" }
+                return 0
+            }
+            set i [lindex $hits 0]
+            set old [string trim [lindex $lines $i]]
+            set lines [lreplace $lines $i $i]
+            writefile $enc $eol $lines
+            putdcc $idx "bistro: entfernt: $old"
+            putlog "bistro: $hand hat \"$old\" entfernt"
+            safecheck
+        }
+        rip {
+            # .bistro rip <Name> TT.MM.JJJJ   bzw.   .bistro rip <Name> -
+            set toks [regexp -all -inline {\S+} $text]
+            set date [lindex $toks end]
+            set who  [join [lrange $toks 1 end-1] " "]
+            if {$who eq "" || ($date ne "-" &&
+                ![regexp {^\+?(\d{1,2})\.(\d{1,2})\.(\d{4})$} $date -> dd dm dy])} {
+                putdcc $idx "Benutzung: .bistro rip <Name> TT.MM.JJJJ   (\"-\" statt Datum entfernt das Todesdatum)"
+                return 0
+            }
+            if {$date eq "-"} {
+                set dd ""; set dm ""; set dy ""
+            } else {
+                scan $dd %d dd; scan $dm %d dm; scan $dy %d dy
+                if {$dd < 1 || $dd > 31 || $dm < 1 || $dm > 12} {
+                    putdcc $idx "bistro: ungueltiges Datum: $date"
+                    return 0
+                }
+            }
+            foreach {enc eol lines} [readfile] break
+            set hits [findlines $lines $who]
+            if {[llength $hits] != 1} {
+                if {[llength $hits] == 0} {
+                    putdcc $idx "bistro: \"$who\" nicht gefunden."
+                } else {
+                    putdcc $idx "bistro: \"$who\" ist nicht eindeutig, bitte vollen Namen angeben:"
+                    foreach i $hits { putdcc $idx "   [string trim [lindex $lines $i]]" }
+                }
+                return 0
+            }
+            set i [lindex $hits 0]
+            foreach {name bd bm - - - by} [parseline [lindex $lines $i]] break
+            set new [formatline $name $bd $bm $dd $dm $dy $by]
+            set lines [lreplace $lines $i $i $new]
+            writefile $enc $eol $lines
+            putdcc $idx "bistro: geaendert: $new"
+            putlog "bistro: $hand hat Todesdatum bei \"$name\" geaendert"
+            safecheck
+        }
         check {
             safecheck
             putdcc $idx "bistro: Pruefung ausgefuehrt."
@@ -454,6 +655,9 @@ proc ::bistro::dcc {hand idx text} {
         }
         default {
             putdcc $idx "Benutzung: .bistro \[status|test TT.MM.|list|check|reload|reset\]"
+            putdcc $idx "           .bistro add <Name> TT.MM.\[JJJJ\] \[+ TT.MM.JJJJ\]"
+            putdcc $idx "           .bistro del <Name>"
+            putdcc $idx "           .bistro rip <Name> TT.MM.JJJJ  (oder - zum Entfernen)"
         }
     }
     return 1
@@ -470,4 +674,4 @@ bind join - "$::bistro::chan *"   ::bistro::onjoin
 bind dcc  m bistro                ::bistro::dcc
 
 ::bistro::load
-putlog "bistro-topic.tcl v1.2 geladen ([llength $::bistro::entries] Eintraege)"
+putlog "bistro-topic.tcl v1.3 geladen ([llength $::bistro::entries] Eintraege)"

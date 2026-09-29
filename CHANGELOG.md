@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3
+- Partyline-Befehle `.bistro add`, `.bistro del` und `.bistro rip` zum Bearbeiten der Liste
+- Vor jeder Änderung wird eine Sicherung `*.bak` angelegt
+- Encoding der Datei (Latin-1/UTF-8) bleibt beim Speichern erhalten
+
 ## 1.2
 - Standard für `ircenc` ist jetzt leer (verhindert doppelt kodierte Umlaute wie „Ã¼")
 - Leerzeichen am Ende der alten Topic werden vor dem Trenner entfernt
