@@ -1,5 +1,5 @@
 # =====================================================================
-#  bistro-topic.tcl  v1.1
+#  bistro-topic.tcl  v1.2
 #  Geburtstage & Todestage im Topic von #irc-bistro
 #  fuer Eggdrop 1.8.x (Tcl 8.5 / 8.6)
 #  Lizenz: MIT - siehe LICENSE
@@ -44,9 +44,10 @@ namespace eval ::bistro {
     variable statefile  "scripts/bistro-topic.state"
     # Zeichensatz der .txt: "auto", "utf-8" oder "iso8859-1"
     variable fileenc    "auto"
-    # Zeichensatz fuer die IRC-Ausgabe.
-    # Umlaute erscheinen als "Ã¼" o.ae.? -> hier "" eintragen.
-    variable ircenc     "utf-8"
+    # Zeichensatz fuer die IRC-Ausgabe. "" = der Eggdrop macht das selbst
+    # (richtig fuer die meisten Builds). Nur wenn Umlaute als "?" o.ae.
+    # ankommen, hier "utf-8" eintragen.
+    variable ircenc     ""
     # Trenner zwischen alter Topic und Zusatz
     variable sep        " | "
     # max. Topic-Laenge (TOPICLEN des Netzwerks, meist 300-390)
@@ -222,6 +223,8 @@ proc ::bistro::cantopic {c} {
 proc ::bistro::compose {base suffix} {
     variable sep
     variable maxlen
+    # Leerzeichen am Ende der alten Topic nicht verdoppeln
+    set base [string trimright $base]
     if {$base eq ""} { set t $suffix } else { set t "$base$sep$suffix" }
     if {[string length $t] <= $maxlen} { return $t }
     set keep [expr {$maxlen - [string length $sep] - [string length $suffix] - 3}]
@@ -467,4 +470,4 @@ bind join - "$::bistro::chan *"   ::bistro::onjoin
 bind dcc  m bistro                ::bistro::dcc
 
 ::bistro::load
-putlog "bistro-topic.tcl v1.1 geladen ([llength $::bistro::entries] Eintraege)"
+putlog "bistro-topic.tcl v1.2 geladen ([llength $::bistro::entries] Eintraege)"
