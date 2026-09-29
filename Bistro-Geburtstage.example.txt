@@ -1,0 +1,11 @@
+Geburtstagsliste #irc-bistro:
+-----------------------------
+# Format: Name  TT.MM.[JJJJ]  [+ TT.MM.JJJJ]   (Todesdatum optional)
+# Leerzeichen oder Tabs beliebig, Zeilen mit # sind Kommentare.
+Alice			03.01.
+Bob (Robert)		07.01.		+ 08.10.2021
+Carol			25.01.
+Dave			25.01.
+Erin			26.01.
+Frank			29.02.
+Grace			15.03.1980
